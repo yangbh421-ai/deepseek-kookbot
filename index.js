@@ -41,7 +41,7 @@ const api = async (method, path, data = null) => {
         });
         return res.data;
     } catch (err) {
-        console.error('API错误:', err.response?.data || err.message);
+        console.error('❌ API错误:', err.response?.data || err.message);
         throw err;
     }
 };
@@ -109,7 +109,7 @@ const connectWS = async () => {
         try {
             let text;
 
-            // ===== 自动解压 =====
+            // ===== 解压处理 =====
             if (isBinary) {
                 try {
                     text = zlib.inflateSync(data).toString();
@@ -132,24 +132,24 @@ const connectWS = async () => {
                 return;
             }
 
-            console.log('📩 收到事件:', event.type);
+            // 🔥 打印真实结构（关键）
+            console.log('📩 原始事件:', JSON.stringify(event).slice(0, 200));
 
             // ===== 心跳 =====
-            if (event.type === 'HELLO') {
-                const interval = event.data.heartbeat_interval;
+            if (event.s === 1) {
+                const interval = event.d.heartbeat_interval;
 
                 if (heartbeatInterval) clearInterval(heartbeatInterval);
 
                 heartbeatInterval = setInterval(() => {
-                    ws.send(JSON.stringify({ type: 'PING' }));
+                    ws.send(JSON.stringify({ s: 2 }));
                 }, interval);
 
                 console.log('💓 心跳启动:', interval);
                 return;
             }
 
-            if (event.type === 'PONG') return;
-
+            // ===== 处理事件 =====
             handleEvent(event);
 
         } catch (err) {
@@ -169,11 +169,15 @@ const connectWS = async () => {
     });
 };
 
-// ===== 事件 =====
+// ===== 事件处理 =====
 const handleEvent = (event) => {
-    const type = event.type;
-const data = event.data || event.d;
+
+    const data = event.d;
     if (!data) return;
+
+    const type = data.type;
+
+    console.log('📦 事件类型:', type);
 
     switch (type) {
 
@@ -186,7 +190,7 @@ const data = event.data || event.d;
                         const res = await sendCard();
                         cardMessageId = res.msg_id;
 
-                        await sendMessage(data.channel_id, '✅ 卡片已发送，请点击表情领取角色');
+                        await sendMessage(data.channel_id, '✅ 卡片已发送');
 
                         console.log('✅ 卡片发送成功:', cardMessageId);
                     } catch (err) {
