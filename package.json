@@ -7,7 +7,7 @@
     "start": "node index.js"
   },
   "dependencies": {
-   "khl.js": "github:khljs/khl.js"
+   "khl.js": "github:khljs/khl.js",
     "dotenv": "^16.0.3"
   },
   "engines": {
