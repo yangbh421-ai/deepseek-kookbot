@@ -208,23 +208,6 @@ const syncRoles = async () => {
     console.log('同步完成');
 };
 
-// ========== WebSocket 解压函数 ==========
-function decompressMessage(data) {
-    // 检测是否是压缩数据（通常以 0x78 开头，即 'x'）
-    if (data[0] === 0x78) {
-        try {
-            const decompressed = zlib.inflateSync(data);
-            return decompressed.toString('utf-8');
-        } catch (err) {
-            console.error('解压失败:', err);
-            return null;
-        }
-    } else {
-        // 可能是未压缩的文本
-        return data.toString('utf-8');
-    }
-}
-
 // ========== 网关连接 ==========
 let wsGatewayUrl = null;
 
@@ -232,7 +215,16 @@ const getGatewayUrl = async () => {
     try {
         const res = await apiRequest('get', '/gateway/index');
         if (res.code === 0 && res.data.url) {
-            return res.data.url;
+            // 移除 compress 参数或改为 0
+            let url = res.data.url;
+            if (url.includes('compress=1')) {
+                url = url.replace('compress=1', 'compress=0');
+            } else if (url.includes('compress=')) {
+                url = url.replace(/compress=\d+/, 'compress=0');
+            } else {
+                url += (url.includes('?') ? '&' : '?') + 'compress=0';
+            }
+            return url;
         } else {
             throw new Error('获取网关地址失败: ' + JSON.stringify(res));
         }
@@ -240,6 +232,33 @@ const getGatewayUrl = async () => {
         console.error('获取网关地址失败:', err);
         throw err;
     }
+};
+
+// 解压数据（如果是 gzip 或 deflate）
+const decompressData = (data) => {
+    return new Promise((resolve, reject) => {
+        // 检查是否为 Buffer
+        if (!Buffer.isBuffer(data)) {
+            resolve(data);
+            return;
+        }
+        // 检查压缩标志（gzip 头部 0x1F 0x8B）
+        if (data.length >= 2 && data[0] === 0x1F && data[1] === 0x8B) {
+            zlib.gunzip(data, (err, result) => {
+                if (err) reject(err);
+                else resolve(result.toString('utf8'));
+            });
+        } else if (data.length >= 2 && (data[0] & 0x0F) === 0x08 && (data[0] >> 4) <= 7) {
+            // 可能的 deflate
+            zlib.inflate(data, (err, result) => {
+                if (err) reject(err);
+                else resolve(result.toString('utf8'));
+            });
+        } else {
+            // 假设是普通文本
+            resolve(data.toString('utf8'));
+        }
+    });
 };
 
 const connectWebSocket = async () => {
@@ -261,53 +280,54 @@ const connectWebSocket = async () => {
         const authPayload = {
             type: 'IDENTIFY',
             token: token,
-            compress: false, // 我们选择不压缩，但网关可能仍返回压缩数据，我们会在接收端解压
-            intents: 1024
+            compress: false,   // 明确禁用压缩
+            intents: 1024      // 监听消息和反应
         };
         ws.send(JSON.stringify(authPayload));
         console.log('已发送 IDENTIFY 包');
     });
 
-    ws.on('message', (data, isBinary) => {
-        let rawString;
-        if (isBinary) {
-            // 二进制数据需要解压
-            const decompressed = decompressMessage(data);
-            if (!decompressed) return;
-            rawString = decompressed;
-        } else {
-            rawString = data.toString();
-        }
-
-        // 尝试解析 JSON
-        let event;
+    ws.on('message', async (data, isBinary) => {
         try {
-            event = JSON.parse(rawString);
+            let messageStr;
+            if (isBinary) {
+                // 尝试解压
+                messageStr = await decompressData(data);
+            } else {
+                messageStr = data.toString();
+            }
+
+            let event;
+            try {
+                event = JSON.parse(messageStr);
+            } catch (err) {
+                console.error('解析 JSON 失败:', err, '原始内容:', messageStr.substring(0, 200));
+                return;
+            }
+
+            console.log(`收到事件: ${event.type || 'unknown'}`);
+
+            if (event.type === 'HEARTBEAT_ACK') {
+                return;
+            }
+
+            if (event.type === 'HELLO') {
+                const interval = event.data.heartbeat_interval;
+                if (heartbeatInterval) clearInterval(heartbeatInterval);
+                heartbeatInterval = setInterval(() => {
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ type: 'PING' }));
+                    }
+                }, interval);
+                console.log('已设置心跳，间隔', interval);
+                return;
+            }
+
+            if (event.type !== 'PONG') {
+                handleGatewayEvent(event);
+            }
         } catch (err) {
-            console.error('解析 JSON 失败:', err, '原始消息:', rawString.substring(0, 200));
-            return;
-        }
-
-        console.log(`收到事件: ${event.type || 'unknown'}`);
-
-        if (event.type === 'HEARTBEAT_ACK') {
-            return;
-        }
-
-        if (event.type === 'HELLO') {
-            const interval = event.data.heartbeat_interval;
-            if (heartbeatInterval) clearInterval(heartbeatInterval);
-            heartbeatInterval = setInterval(() => {
-                if (ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({ type: 'PING' }));
-                }
-            }, interval);
-            console.log('已设置心跳，间隔', interval);
-            return;
-        }
-
-        if (event.type !== 'PONG') {
-            handleGatewayEvent(event);
+            console.error('处理消息时出错:', err);
         }
     });
 
@@ -331,7 +351,7 @@ const handleGatewayEvent = (event) => {
     switch (type) {
         case 'MESSAGE_CREATE':
             console.log('收到消息:', d.content);
-            if (d.type !== 1) break;
+            if (d.type !== 1) break; // 只处理文本消息
             if (d.content === '!sendcard') {
                 console.log('收到 !sendcard 指令，来自用户:', d.author.id);
                 (async () => {
