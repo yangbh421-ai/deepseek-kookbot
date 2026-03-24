@@ -16,12 +16,12 @@ if (!token || !guildId || !pcRoleId || !consoleRoleId || !announceChannelId) {
 }
 
 const API_BASE = 'https://www.kookapp.cn/api/v3';
-const CARD_MARKER = '【角色自助分配卡片】请点击下方表情获取对应角色：';
 
 let ws = null;
 let heartbeatInterval = null;
 let cardMessageId = null;
 
+// ===== emoji 对应角色 =====
 const emojiRoleMap = {
     '🖱️': pcRoleId,
     '🎮': consoleRoleId
@@ -57,7 +57,7 @@ const sendCard = async () => {
             type: "section",
             text: {
                 type: "kmarkdown",
-                content: `${CARD_MARKER}\n🖱️ PC平台\n🎮 主机平台`
+                content: "【角色自助分配】\n🖱️ PC玩家\n🎮 主机玩家"
             }
         }]
     }];
@@ -96,12 +96,12 @@ const connectWS = async () => {
     ws = new WebSocket(url);
 
     ws.on('open', () => {
-        console.log('✅ WS连接成功');
+        console.log('✅ 已连接KOOK');
 
         ws.send(JSON.stringify({
             type: 'IDENTIFY',
             token: token,
-            intents: 513
+            intents: 0   // 🔥 最关键：必须是0
         }));
     });
 
@@ -109,7 +109,7 @@ const connectWS = async () => {
         try {
             let text;
 
-            // ===== 解压处理 =====
+            // ===== 自动解压 =====
             if (isBinary) {
                 try {
                     text = zlib.inflateSync(data).toString();
@@ -128,14 +128,13 @@ const connectWS = async () => {
             try {
                 event = JSON.parse(text);
             } catch {
-                console.log('❌ JSON解析失败:', text.slice(0, 100));
                 return;
             }
 
-            // 🔥 打印真实结构（关键）
-            console.log('📩 原始事件:', JSON.stringify(event).slice(0, 200));
+            // ===== 忽略心跳返回（避免刷屏）=====
+            if (event.s === 3) return;
 
-            // ===== 心跳 =====
+            // ===== HELLO（启动心跳）=====
             if (event.s === 1) {
                 const interval = event.d.heartbeat_interval;
 
@@ -145,11 +144,10 @@ const connectWS = async () => {
                     ws.send(JSON.stringify({ s: 2 }));
                 }, interval);
 
-                console.log('💓 心跳启动:', interval);
+                console.log('💓 心跳启动');
                 return;
             }
 
-            // ===== 处理事件 =====
             handleEvent(event);
 
         } catch (err) {
@@ -158,14 +156,9 @@ const connectWS = async () => {
     });
 
     ws.on('close', () => {
-        console.log('❌ WS断开，5秒重连');
+        console.log('❌ 断开，重连中...');
         clearInterval(heartbeatInterval);
         setTimeout(connectWS, 5000);
-    });
-
-    ws.on('error', (err) => {
-        console.error('WS错误:', err);
-        ws.close();
     });
 };
 
@@ -177,58 +170,43 @@ const handleEvent = (event) => {
 
     const type = data.type;
 
-    console.log('📦 事件类型:', type);
+    if (type === 'MESSAGE_CREATE') {
+        console.log('💬 收到:', data.content);
 
-    switch (type) {
+        if (data.content === '!sendcard') {
+            (async () => {
+                const res = await sendCard();
+                cardMessageId = res.msg_id;
 
-        case 'MESSAGE_CREATE':
-            console.log('💬 收到消息:', data.content);
+                await sendMessage(data.channel_id, '✅ 卡片已发送，点表情领角色');
+            })();
+        }
+    }
 
-            if (data.content === '!sendcard') {
-                (async () => {
-                    try {
-                        const res = await sendCard();
-                        cardMessageId = res.msg_id;
+    if (type === 'added_reaction') {
+        if (data.msg_id !== cardMessageId) return;
 
-                        await sendMessage(data.channel_id, '✅ 卡片已发送');
+        const role = emojiRoleMap[data.emoji.name];
+        if (role) {
+            console.log('👍 加角色:', data.user_id);
+            grantRole(data.user_id, role);
+        }
+    }
 
-                        console.log('✅ 卡片发送成功:', cardMessageId);
-                    } catch (err) {
-                        console.error('发送失败:', err);
-                    }
-                })();
-            }
-            break;
+    if (type === 'deleted_reaction') {
+        if (data.msg_id !== cardMessageId) return;
 
-        case 'added_reaction':
-            if (data.msg_id !== cardMessageId) return;
-
-            console.log('👍 添加反应:', data.emoji.name);
-
-            const roleAdd = emojiRoleMap[data.emoji.name];
-            if (roleAdd) {
-                grantRole(data.user_id, roleAdd)
-                    .catch(err => console.error('加角色失败:', err.message));
-            }
-            break;
-
-        case 'deleted_reaction':
-            if (data.msg_id !== cardMessageId) return;
-
-            console.log('👎 移除反应:', data.emoji.name);
-
-            const roleRemove = emojiRoleMap[data.emoji.name];
-            if (roleRemove) {
-                revokeRole(data.user_id, roleRemove)
-                    .catch(err => console.error('删角色失败:', err.message));
-            }
-            break;
+        const role = emojiRoleMap[data.emoji.name];
+        if (role) {
+            console.log('👎 移除角色:', data.user_id);
+            revokeRole(data.user_id, role);
+        }
     }
 };
 
 // ===== 启动 =====
-const start = async () => {
-    console.log('🚀 启动机器人');
+const start = () => {
+    console.log('🚀 启动成功');
     connectWS();
 };
 
