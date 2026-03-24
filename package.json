@@ -1,0 +1,16 @@
+{
+  "name": "kook-role-bot",
+  "version": "1.0.0",
+  "description": "KOOK 角色分配机器人 - 通过表情反应自助分配角色",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "khl.js": "^0.6.3",
+    "dotenv": "^16.0.3"
+  },
+  "engines": {
+    "node": ">=16"
+  }
+}
