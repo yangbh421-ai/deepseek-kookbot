@@ -1,6 +1,7 @@
 require('dotenv').config();
 const WebSocket = require('ws');
 const axios = require('axios');
+const zlib = require('zlib');
 
 // 环境变量
 const token = process.env.KOOK_TOKEN;
@@ -224,6 +225,39 @@ const getGatewayUrl = async () => {
     }
 };
 
+// 处理 WebSocket 消息（可能压缩）
+const processMessage = (messageStr) => {
+    let event;
+    try {
+        event = JSON.parse(messageStr);
+    } catch (err) {
+        console.error('解析消息失败:', err, '原始消息:', messageStr.substring(0, 200));
+        return;
+    }
+
+    console.log(`收到事件: ${event.type || 'unknown'}`);
+
+    if (event.type === 'HEARTBEAT_ACK') {
+        return;
+    }
+
+    if (event.type === 'HELLO') {
+        const interval = event.data.heartbeat_interval;
+        if (heartbeatInterval) clearInterval(heartbeatInterval);
+        heartbeatInterval = setInterval(() => {
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'PING' }));
+            }
+        }, interval);
+        console.log('已设置心跳，间隔', interval);
+        return;
+    }
+
+    if (event.type !== 'PONG') {
+        handleGatewayEvent(event);
+    }
+};
+
 const connectWebSocket = async () => {
     if (!wsGatewayUrl) {
         try {
@@ -243,44 +277,32 @@ const connectWebSocket = async () => {
         const authPayload = {
             type: 'IDENTIFY',
             token: token,
-            compress: false,
-            intents: 1024 // 监听消息和反应
+            compress: true,  // 启用压缩
+            intents: 1024
         };
         ws.send(JSON.stringify(authPayload));
         console.log('已发送 IDENTIFY 包');
     });
 
     ws.on('message', (data) => {
-        const message = data.toString();
-        let event;
-        try {
-            event = JSON.parse(message);
-        } catch (err) {
-            console.error('解析消息失败:', err, '原始消息:', message.substring(0, 200));
-            return;
-        }
-
-        // 打印所有事件类型，方便调试
-        console.log(`收到事件: ${event.type || 'unknown'}`);
-
-        if (event.type === 'HEARTBEAT_ACK') {
-            return;
-        }
-
-        if (event.type === 'HELLO') {
-            const interval = event.data.heartbeat_interval;
-            if (heartbeatInterval) clearInterval(heartbeatInterval);
-            heartbeatInterval = setInterval(() => {
-                if (ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({ type: 'PING' }));
-                }
-            }, interval);
-            console.log('已设置心跳，间隔', interval);
-            return;
-        }
-
-        if (event.type !== 'PONG') {
-            handleGatewayEvent(event);
+        // 处理可能的压缩数据
+        if (Buffer.isBuffer(data)) {
+            // 检查是否为 gzip 压缩（开头 0x1f 0x8b）
+            if (data.length > 1 && data[0] === 0x1f && data[1] === 0x8b) {
+                zlib.gunzip(data, (err, decompressed) => {
+                    if (err) {
+                        console.error('解压失败:', err);
+                        return;
+                    }
+                    processMessage(decompressed.toString());
+                });
+                return;
+            } else {
+                // 可能是未压缩的二进制，直接转字符串
+                processMessage(data.toString());
+            }
+        } else {
+            processMessage(data);
         }
     });
 
