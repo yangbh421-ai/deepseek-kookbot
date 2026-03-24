@@ -171,7 +171,8 @@ const connectWS = async () => {
 
 // ===== 事件 =====
 const handleEvent = (event) => {
-    const { type, data } = event;
+    const type = event.type;
+const data = event.data || event.d;
     if (!data) return;
 
     switch (type) {
