@@ -1,5 +1,6 @@
 require('dotenv').config();
 const axios = require('axios');
+const WebSocket = require('ws');
 
 const token = process.env.KOOK_TOKEN;
 const guildId = process.env.GUILD_ID;
@@ -9,10 +10,6 @@ const channelId = process.env.ANNOUNCE_CHANNEL_ID;
 
 const API = 'https://www.kookapp.cn/api/v3';
 
-let handledMsgIds = new Set();
-let cardMessageId = null;
-
-// ===== API =====
 const api = async (method, url, data = null) => {
     const res = await axios({
         method,
@@ -26,33 +23,43 @@ const api = async (method, url, data = null) => {
     return res.data;
 };
 
-const sendMessage = (content) =>
-    api('post', '/message/create', {
-        channel_id: channelId,
-        content,
-        type: 1
-    });
-
 const sendCard = async () => {
     const card = [{
         type: "card",
         theme: "info",
-        modules: [{
-            type: "section",
-            text: {
-                type: "kmarkdown",
-                content: "【角色自助分配】\n🖱️ PC玩家\n🎮 主机玩家"
+        modules: [
+            {
+                type: "section",
+                text: {
+                    type: "kmarkdown",
+                    content: "【角色自助分配】\n请选择你的平台"
+                }
+            },
+            {
+                type: "action-group",
+                elements: [
+                    {
+                        type: "button",
+                        text: { type: "plain-text", content: "🖱️ PC玩家" },
+                        value: "pc",
+                        click: "return-val"
+                    },
+                    {
+                        type: "button",
+                        text: { type: "plain-text", content: "🎮 主机玩家" },
+                        value: "console",
+                        click: "return-val"
+                    }
+                ]
             }
-        }]
+        ]
     }];
 
-    const res = await api('post', '/message/create', {
+    await api('post', '/message/create', {
         channel_id: channelId,
         type: 10,
         content: JSON.stringify(card)
     });
-
-    return res.data;
 };
 
 const grantRole = (userId, roleId) =>
@@ -62,63 +69,51 @@ const grantRole = (userId, roleId) =>
         role_id: roleId
     });
 
-// ===== 监听指令 =====
-const checkMessages = async () => {
-    const res = await api('get', `/message/list?channel_id=${channelId}&limit=20`);
-    const msgs = res.data.items;
+// ===== WS监听按钮点击 =====
+const connectWS = async () => {
+    const res = await api('get', '/gateway/index');
+    const ws = new WebSocket(res.data.url);
 
-    for (const msg of msgs) {
-        if (handledMsgIds.has(msg.id)) continue;
-        handledMsgIds.add(msg.id);
+    ws.on('open', () => {
+        console.log('✅ WS连接');
 
-        if (msg.author?.bot) continue;
+        ws.send(JSON.stringify({
+            type: 'IDENTIFY',
+            token: token,
+            intents: 0
+        }));
+    });
 
-        if (msg.content === '!sendcard') {
-            console.log('💬 收到 !sendcard');
-
-            const card = await sendCard();
-            cardMessageId = card.msg_id;
-
-            await sendMessage('✅ 卡片已发送，请点emoji获取角色');
+    ws.on('message', (msg) => {
+        let data;
+        try {
+            data = JSON.parse(msg.toString());
+        } catch {
+            return;
         }
-    }
-};
 
-// ===== 同步reaction（核心）=====
-const syncReactions = async () => {
-    if (!cardMessageId) return;
+        if (!data.d) return;
 
-    try {
-        const res = await api('get', `/message/view?msg_id=${cardMessageId}`);
-        const msg = res.data;
+        // 👉 按钮点击事件
+        if (data.d.type === 'message_btn_click') {
+            const userId = data.d.user_id;
+            const val = data.d.value;
 
-        const reactions = msg.reactions || [];
+            console.log('按钮点击:', userId, val);
 
-        for (const r of reactions) {
-            const emoji = r.emoji.name;
+            if (val === 'pc') {
+                grantRole(userId, pcRoleId);
+            }
 
-            let roleId = null;
-            if (emoji === '🖱️') roleId = pcRoleId;
-            if (emoji === '🎮') roleId = consoleRoleId;
-
-            if (!roleId) continue;
-
-            for (const user of r.users || []) {
-                console.log('🎯 给角色:', user.id, emoji);
-                await grantRole(user.id, roleId);
+            if (val === 'console') {
+                grantRole(userId, consoleRoleId);
             }
         }
-
-    } catch (err) {
-        console.error('同步失败:', err.message);
-    }
+    });
 };
 
 // ===== 启动 =====
-console.log('🚀 终极稳定版启动');
+console.log('🚀 按钮版启动');
 
-// 指令监听
-setInterval(checkMessages, 3000);
-
-// emoji同步
-setInterval(syncReactions, 5000);
+sendCard();
+connectWS();
