@@ -7,7 +7,7 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "@khl.js/core": "^0.6.3",
+    "axios": "^1.6.0",
     "dotenv": "^16.0.3"
   },
   "engines": {
