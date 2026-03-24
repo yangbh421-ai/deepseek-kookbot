@@ -1,9 +1,8 @@
 require('dotenv').config();
 const WebSocket = require('ws');
 const axios = require('axios');
-const zlib = require('zlib');
 
-// 环境变量
+// ========== 环境变量 ==========
 const token = process.env.KOOK_TOKEN;
 const guildId = process.env.GUILD_ID;
 const pcRoleId = process.env.PC_ROLE_ID;
@@ -12,12 +11,13 @@ const announceChannelId = process.env.ANNOUNCE_CHANNEL_ID;
 const adminRoleId = process.env.ADMIN_ROLE_ID;
 
 if (!token || !guildId || !pcRoleId || !consoleRoleId || !announceChannelId) {
-    console.error('缺少必要的环境变量');
+    console.error('❌ 缺少必要的环境变量');
     process.exit(1);
 }
 
 const API_BASE = 'https://www.kookapp.cn/api/v3';
 const CARD_MARKER = '【角色自助分配卡片】请点击下方表情获取对应角色：';
+
 let cardMessageId = null;
 let ws = null;
 let heartbeatInterval = null;
@@ -27,110 +27,67 @@ const emojiRoleMap = {
     '🎮': consoleRoleId
 };
 
-// ========== API 请求封装 ==========
+// ========== API ==========
 const apiRequest = async (method, path, data = null) => {
-    const url = `${API_BASE}${path}`;
-    const headers = {
-        'Authorization': `Bot ${token}`,
-        'Content-Type': 'application/json'
-    };
     try {
-        const response = await axios({ method, url, data, headers });
-        console.log(`API ${method} ${path} 成功`);
-        return response.data;
+        const res = await axios({
+            method,
+            url: API_BASE + path,
+            headers: {
+                Authorization: `Bot ${token}`,
+                'Content-Type': 'application/json'
+            },
+            data
+        });
+        return res.data;
     } catch (err) {
-        console.error(`API 请求失败 (${method} ${path}):`, err.response?.data || err.message);
+        console.error('API错误:', err.response?.data || err.message);
         throw err;
     }
 };
 
-// 发送文本消息
-const sendMessage = async (channelId, content) => {
-    const data = { channel_id: channelId, content, type: 1 };
-    return await apiRequest('post', '/message/create', data);
-};
+const sendMessage = (channelId, content) =>
+    apiRequest('post', '/message/create', { channel_id: channelId, content, type: 1 });
 
-// 发送卡片消息
-const sendCardMessage = async (channelId, cardArray) => {
-    const data = {
+const sendCardMessage = (channelId, card) =>
+    apiRequest('post', '/message/create', {
         channel_id: channelId,
         type: 10,
-        content: JSON.stringify(cardArray)
-    };
-    return await apiRequest('post', '/message/create', data);
-};
+        content: JSON.stringify(card)
+    });
 
-// 角色操作
-const grantRole = async (userId, roleId) => {
-    const data = { guild_id: guildId, user_id: userId, role_id: roleId };
-    return await apiRequest('post', '/guild/grant-role', data);
-};
+const grantRole = (userId, roleId) =>
+    apiRequest('post', '/guild/grant-role', {
+        guild_id: guildId,
+        user_id: userId,
+        role_id: roleId
+    });
 
-const revokeRole = async (userId, roleId) => {
-    const data = { guild_id: guildId, user_id: userId, role_id: roleId };
-    return await apiRequest('post', '/guild/revoke-role', data);
-};
+const revokeRole = (userId, roleId) =>
+    apiRequest('post', '/guild/revoke-role', {
+        guild_id: guildId,
+        user_id: userId,
+        role_id: roleId
+    });
 
-// 获取频道消息列表
-const getMessages = async (channelId, limit = 100) => {
-    const url = `/message/list?channel_id=${channelId}&limit=${limit}`;
-    const res = await apiRequest('get', url);
+const getMessages = async () => {
+    const res = await apiRequest('get', `/message/list?channel_id=${announceChannelId}&limit=50`);
     return res.data?.items || [];
 };
 
-// 获取消息详情
 const getMessage = async (msgId) => {
     const res = await apiRequest('get', `/message/view?msg_id=${msgId}`);
     return res.data;
 };
 
-// 获取服务器成员列表
-const getGuildMembers = async (page = 1, pageSize = 200) => {
-    const url = `/guild/user-list?guild_id=${guildId}&page=${page}&page_size=${pageSize}`;
-    const res = await apiRequest('get', url);
-    return res.data?.items || [];
-};
-
-// 获取用户信息
-const getUserInfo = async (userId) => {
-    const res = await apiRequest('get', `/user/view?user_id=${userId}`);
-    return res.data;
-};
-
-// 检查管理员权限
-const isAdmin = async (userId) => {
-    try {
-        if (adminRoleId) {
-            const user = await getUserInfo(userId);
-            return user.roles && user.roles.includes(adminRoleId);
-        } else {
-            const user = await getUserInfo(userId);
-            return user.is_admin === true;
-        }
-    } catch (err) {
-        console.error('检查管理员权限失败:', err);
-        return false;
-    }
-};
-
-// 查找已有卡片
+// ========== 卡片 ==========
 const findExistingCard = async () => {
-    try {
-        const messages = await getMessages(announceChannelId, 100);
-        for (const msg of messages) {
-            if (msg.author.bot && msg.content.includes(CARD_MARKER)) {
-                return msg;
-            }
-        }
-    } catch (err) {
-        console.error('查找已有卡片失败:', err);
-    }
-    return null;
+    const list = await getMessages();
+    return list.find(m => m.content.includes(CARD_MARKER));
 };
 
-// 发送角色卡片
 const sendRoleCard = async () => {
-    const card = {
+    const card = [{
         type: "card",
         theme: "info",
         modules: [
@@ -138,291 +95,146 @@ const sendRoleCard = async () => {
                 type: "section",
                 text: {
                     type: "kmarkdown",
-                    content: CARD_MARKER + "\n🖱️ PC平台\n🎮 主机平台"
+                    content: `${CARD_MARKER}\n🖱️ PC平台\n🎮 主机平台`
                 }
-            },
-            {
-                type: "divider"
             }
         ]
-    };
-    const result = await sendCardMessage(announceChannelId, [card]);
-    return result.data;
+    }];
+
+    const res = await sendCardMessage(announceChannelId, card);
+    return res.data;
 };
 
-// 同步角色
+// ========== 同步 ==========
 const syncRoles = async () => {
-    if (!cardMessageId) {
-        console.log('未找到卡片消息，跳过同步');
-        return;
-    }
-    console.log('开始同步角色...');
-    let msg;
-    try {
-        msg = await getMessage(cardMessageId);
-        if (!msg) {
-            console.log('卡片消息不存在，跳过同步');
-            return;
-        }
-    } catch (err) {
-        console.error('获取卡片消息失败:', err);
-        return;
-    }
+    if (!cardMessageId) return;
 
-    const reactionUsersMap = {};
+    console.log('🔄 同步角色...');
+
+    const msg = await getMessage(cardMessageId);
+
     for (const [emoji, roleId] of Object.entries(emojiRoleMap)) {
         const reaction = msg.reactions?.find(r => r.emoji.name === emoji);
-        if (reaction && reaction.users) {
-            reactionUsersMap[roleId] = new Set(reaction.users.map(u => u.id));
-        } else {
-            reactionUsersMap[roleId] = new Set();
+        if (!reaction) continue;
+
+        for (const user of reaction.users || []) {
+            await grantRole(user.id, roleId).catch(() => {});
         }
-    }
-
-    for (const [roleId, users] of Object.entries(reactionUsersMap)) {
-        for (const userId of users) {
-            await grantRole(userId, roleId).catch(err => console.error(`添加角色失败 (${userId}):`, err.message));
-        }
-    }
-
-    let allMembers = [];
-    let page = 1;
-    while (true) {
-        const members = await getGuildMembers(page, 200);
-        if (!members || members.length === 0) break;
-        allMembers.push(...members);
-        if (members.length < 200) break;
-        page++;
-    }
-
-    for (const member of allMembers) {
-        const userId = member.id;
-        for (const [emoji, roleId] of Object.entries(emojiRoleMap)) {
-            if (member.roles.includes(roleId)) {
-                if (!reactionUsersMap[roleId]?.has(userId)) {
-                    await revokeRole(userId, roleId).catch(err => console.error(`移除角色失败 (${userId}):`, err.message));
-                }
-            }
-        }
-    }
-    console.log('同步完成');
-};
-
-// ========== 网关连接 ==========
-let wsGatewayUrl = null;
-
-const getGatewayUrl = async () => {
-    try {
-        const res = await apiRequest('get', '/gateway/index');
-        if (res.code === 0 && res.data.url) {
-            // 移除 compress 参数或改为 0
-            let url = res.data.url;
-            if (url.includes('compress=1')) {
-                url = url.replace('compress=1', 'compress=0');
-            } else if (url.includes('compress=')) {
-                url = url.replace(/compress=\d+/, 'compress=0');
-            } else {
-                url += (url.includes('?') ? '&' : '?') + 'compress=0';
-            }
-            return url;
-        } else {
-            throw new Error('获取网关地址失败: ' + JSON.stringify(res));
-        }
-    } catch (err) {
-        console.error('获取网关地址失败:', err);
-        throw err;
     }
 };
 
-// 解压数据（如果是 gzip 或 deflate）
-const decompressData = (data) => {
-    return new Promise((resolve, reject) => {
-        // 检查是否为 Buffer
-        if (!Buffer.isBuffer(data)) {
-            resolve(data);
-            return;
-        }
-        // 检查压缩标志（gzip 头部 0x1F 0x8B）
-        if (data.length >= 2 && data[0] === 0x1F && data[1] === 0x8B) {
-            zlib.gunzip(data, (err, result) => {
-                if (err) reject(err);
-                else resolve(result.toString('utf8'));
-            });
-        } else if (data.length >= 2 && (data[0] & 0x0F) === 0x08 && (data[0] >> 4) <= 7) {
-            // 可能的 deflate
-            zlib.inflate(data, (err, result) => {
-                if (err) reject(err);
-                else resolve(result.toString('utf8'));
-            });
-        } else {
-            // 假设是普通文本
-            resolve(data.toString('utf8'));
-        }
-    });
+// ========== 网关 ==========
+const getGateway = async () => {
+    const res = await apiRequest('get', '/gateway/index');
+    return res.data.url + '&compress=0';
 };
 
-const connectWebSocket = async () => {
-    if (!wsGatewayUrl) {
-        try {
-            wsGatewayUrl = await getGatewayUrl();
-            console.log('网关地址:', wsGatewayUrl);
-        } catch (err) {
-            console.error('无法获取网关地址，5秒后重试');
-            setTimeout(connectWebSocket, 5000);
-            return;
-        }
-    }
-
-    ws = new WebSocket(wsGatewayUrl);
+const connectWS = async () => {
+    const url = await getGateway();
+    ws = new WebSocket(url);
 
     ws.on('open', () => {
-        console.log('WebSocket 已连接');
-        const authPayload = {
+        console.log('✅ WS连接成功');
+
+        ws.send(JSON.stringify({
             type: 'IDENTIFY',
-            token: token,
-            compress: false,   // 明确禁用压缩
-            intents: 1024      // 监听消息和反应
-        };
-        ws.send(JSON.stringify(authPayload));
-        console.log('已发送 IDENTIFY 包');
+            token,
+            intents: 513
+        }));
     });
 
-    ws.on('message', async (data, isBinary) => {
+    ws.on('message', (msg) => {
+        let event;
+
         try {
-            let messageStr;
-            if (isBinary) {
-                // 尝试解压
-                messageStr = await decompressData(data);
-            } else {
-                messageStr = data.toString();
-            }
-
-            let event;
-            try {
-                event = JSON.parse(messageStr);
-            } catch (err) {
-                console.error('解析 JSON 失败:', err, '原始内容:', messageStr.substring(0, 200));
-                return;
-            }
-
-            console.log(`收到事件: ${event.type || 'unknown'}`);
-
-            if (event.type === 'HEARTBEAT_ACK') {
-                return;
-            }
-
-            if (event.type === 'HELLO') {
-                const interval = event.data.heartbeat_interval;
-                if (heartbeatInterval) clearInterval(heartbeatInterval);
-                heartbeatInterval = setInterval(() => {
-                    if (ws.readyState === WebSocket.OPEN) {
-                        ws.send(JSON.stringify({ type: 'PING' }));
-                    }
-                }, interval);
-                console.log('已设置心跳，间隔', interval);
-                return;
-            }
-
-            if (event.type !== 'PONG') {
-                handleGatewayEvent(event);
-            }
-        } catch (err) {
-            console.error('处理消息时出错:', err);
+            event = JSON.parse(msg.toString());
+        } catch {
+            console.log('解析失败:', msg.toString().slice(0, 100));
+            return;
         }
+
+        console.log('📩 收到事件:', event.type);
+
+        if (event.type === 'HELLO') {
+            const interval = event.data.heartbeat_interval;
+            heartbeatInterval = setInterval(() => {
+                ws.send(JSON.stringify({ type: 'PING' }));
+            }, interval);
+            return;
+        }
+
+        if (event.type === 'PONG') return;
+
+        handleEvent(event);
     });
 
-    ws.on('close', (code, reason) => {
-        console.log(`WebSocket 关闭: ${code} ${reason}`);
-        if (heartbeatInterval) clearInterval(heartbeatInterval);
-        setTimeout(connectWebSocket, 5000);
-    });
-
-    ws.on('error', (err) => {
-        console.error('WebSocket 错误:', err);
-        ws.close();
+    ws.on('close', () => {
+        console.log('❌ WS断开，5秒重连');
+        clearInterval(heartbeatInterval);
+        setTimeout(connectWS, 5000);
     });
 };
 
-// ========== 事件处理 ==========
-const handleGatewayEvent = (event) => {
-    const { type, d } = event;
-    console.log(`处理事件: ${type}`);
+// ========== 事件 ==========
+const handleEvent = (event) => {
+    const { type, data } = event;
+
+    if (!data) return;
+
+    // 🔥 关键日志
+    console.log('👉 事件数据:', JSON.stringify(data).slice(0, 200));
 
     switch (type) {
+
         case 'MESSAGE_CREATE':
-            console.log('收到消息:', d.content);
-            if (d.type !== 1) break; // 只处理文本消息
-            if (d.content === '!sendcard') {
-                console.log('收到 !sendcard 指令，来自用户:', d.author.id);
+            if (data.content === '!sendcard') {
                 (async () => {
-                    const isAuth = await isAdmin(d.author.id);
-                    if (!isAuth) {
-                        console.log('用户无权限');
-                        await sendMessage(d.channel_id, '你没有权限执行此指令。');
-                        return;
-                    }
-                    try {
-                        const newMsg = await sendRoleCard();
-                        cardMessageId = newMsg.msg_id;
-                        console.log('卡片已发送，ID:', cardMessageId);
-                        await syncRoles();
-                        await sendMessage(d.channel_id, '卡片已发送，并已同步角色状态。');
-                    } catch (err) {
-                        console.error('发送卡片失败:', err);
-                        await sendMessage(d.channel_id, '发送卡片失败，请检查日志。');
-                    }
+                    const res = await sendRoleCard();
+                    cardMessageId = res.msg_id;
+                    await sendMessage(data.channel_id, '✅ 卡片已发送');
                 })();
             }
             break;
 
-        case 'MESSAGE_REACTION_ADDED':
-            console.log('添加反应:', d.emoji.name, '用户:', d.user_id);
-            if (d.guild_id !== guildId) break;
-            if (d.msg_id !== cardMessageId) break;
-            if (d.user_id === '1') break;
+        case 'added_reaction':
+            if (data.msg_id !== cardMessageId) return;
 
-            const roleAdd = emojiRoleMap[d.emoji.name];
+            console.log('👍 添加反应:', data.emoji.name);
+
+            const roleAdd = emojiRoleMap[data.emoji.name];
             if (roleAdd) {
-                grantRole(d.user_id, roleAdd).catch(err => console.error(`添加角色失败:`, err.message));
+                grantRole(data.user_id, roleAdd);
             }
             break;
 
-        case 'MESSAGE_REACTION_REMOVED':
-            console.log('移除反应:', d.emoji.name, '用户:', d.user_id);
-            if (d.guild_id !== guildId) break;
-            if (d.msg_id !== cardMessageId) break;
-            if (d.user_id === '1') break;
+        case 'deleted_reaction':
+            if (data.msg_id !== cardMessageId) return;
 
-            const roleRemove = emojiRoleMap[d.emoji.name];
+            console.log('👎 移除反应:', data.emoji.name);
+
+            const roleRemove = emojiRoleMap[data.emoji.name];
             if (roleRemove) {
-                revokeRole(d.user_id, roleRemove).catch(err => console.error(`移除角色失败:`, err.message));
+                revokeRole(data.user_id, roleRemove);
             }
-            break;
-
-        default:
-            console.log('未处理的事件类型:', type);
             break;
     }
 };
 
 // ========== 启动 ==========
 const start = async () => {
-    console.log('启动机器人...');
+    console.log('🚀 启动机器人');
+
     const existing = await findExistingCard();
+
     if (existing) {
         cardMessageId = existing.msg_id;
-        console.log(`找到已有卡片: ${cardMessageId}`);
+        console.log('✅ 找到卡片:', cardMessageId);
         await syncRoles();
     } else {
-        console.log('未找到已有卡片，请使用 !sendcard 指令发送。');
+        console.log('⚠️ 没有卡片，请发送 !sendcard');
     }
 
-    setInterval(async () => {
-        console.log('执行定时同步...');
-        await syncRoles();
-    }, 24 * 60 * 60 * 1000);
-
-    connectWebSocket();
+    connectWS();
 };
 
 start();
