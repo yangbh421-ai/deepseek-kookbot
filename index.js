@@ -208,6 +208,23 @@ const syncRoles = async () => {
     console.log('同步完成');
 };
 
+// ========== WebSocket 解压函数 ==========
+function decompressMessage(data) {
+    // 检测是否是压缩数据（通常以 0x78 开头，即 'x'）
+    if (data[0] === 0x78) {
+        try {
+            const decompressed = zlib.inflateSync(data);
+            return decompressed.toString('utf-8');
+        } catch (err) {
+            console.error('解压失败:', err);
+            return null;
+        }
+    } else {
+        // 可能是未压缩的文本
+        return data.toString('utf-8');
+    }
+}
+
 // ========== 网关连接 ==========
 let wsGatewayUrl = null;
 
@@ -222,39 +239,6 @@ const getGatewayUrl = async () => {
     } catch (err) {
         console.error('获取网关地址失败:', err);
         throw err;
-    }
-};
-
-// 处理 WebSocket 消息（可能压缩）
-const processMessage = (messageStr) => {
-    let event;
-    try {
-        event = JSON.parse(messageStr);
-    } catch (err) {
-        console.error('解析消息失败:', err, '原始消息:', messageStr.substring(0, 200));
-        return;
-    }
-
-    console.log(`收到事件: ${event.type || 'unknown'}`);
-
-    if (event.type === 'HEARTBEAT_ACK') {
-        return;
-    }
-
-    if (event.type === 'HELLO') {
-        const interval = event.data.heartbeat_interval;
-        if (heartbeatInterval) clearInterval(heartbeatInterval);
-        heartbeatInterval = setInterval(() => {
-            if (ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'PING' }));
-            }
-        }, interval);
-        console.log('已设置心跳，间隔', interval);
-        return;
-    }
-
-    if (event.type !== 'PONG') {
-        handleGatewayEvent(event);
     }
 };
 
@@ -277,32 +261,53 @@ const connectWebSocket = async () => {
         const authPayload = {
             type: 'IDENTIFY',
             token: token,
-            compress: true,  // 启用压缩
+            compress: false, // 我们选择不压缩，但网关可能仍返回压缩数据，我们会在接收端解压
             intents: 1024
         };
         ws.send(JSON.stringify(authPayload));
         console.log('已发送 IDENTIFY 包');
     });
 
-    ws.on('message', (data) => {
-        // 处理可能的压缩数据
-        if (Buffer.isBuffer(data)) {
-            // 检查是否为 gzip 压缩（开头 0x1f 0x8b）
-            if (data.length > 1 && data[0] === 0x1f && data[1] === 0x8b) {
-                zlib.gunzip(data, (err, decompressed) => {
-                    if (err) {
-                        console.error('解压失败:', err);
-                        return;
-                    }
-                    processMessage(decompressed.toString());
-                });
-                return;
-            } else {
-                // 可能是未压缩的二进制，直接转字符串
-                processMessage(data.toString());
-            }
+    ws.on('message', (data, isBinary) => {
+        let rawString;
+        if (isBinary) {
+            // 二进制数据需要解压
+            const decompressed = decompressMessage(data);
+            if (!decompressed) return;
+            rawString = decompressed;
         } else {
-            processMessage(data);
+            rawString = data.toString();
+        }
+
+        // 尝试解析 JSON
+        let event;
+        try {
+            event = JSON.parse(rawString);
+        } catch (err) {
+            console.error('解析 JSON 失败:', err, '原始消息:', rawString.substring(0, 200));
+            return;
+        }
+
+        console.log(`收到事件: ${event.type || 'unknown'}`);
+
+        if (event.type === 'HEARTBEAT_ACK') {
+            return;
+        }
+
+        if (event.type === 'HELLO') {
+            const interval = event.data.heartbeat_interval;
+            if (heartbeatInterval) clearInterval(heartbeatInterval);
+            heartbeatInterval = setInterval(() => {
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'PING' }));
+                }
+            }, interval);
+            console.log('已设置心跳，间隔', interval);
+            return;
+        }
+
+        if (event.type !== 'PONG') {
+            handleGatewayEvent(event);
         }
     });
 
@@ -326,7 +331,7 @@ const handleGatewayEvent = (event) => {
     switch (type) {
         case 'MESSAGE_CREATE':
             console.log('收到消息:', d.content);
-            if (d.type !== 1) break; // 只处理文本消息
+            if (d.type !== 1) break;
             if (d.content === '!sendcard') {
                 console.log('收到 !sendcard 指令，来自用户:', d.author.id);
                 (async () => {
