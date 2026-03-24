@@ -1,9 +1,6 @@
 require('dotenv').config();
 const axios = require('axios');
-const WebSocket = require('ws');
-const zlib = require('zlib');
 
-// ===== 环境变量 =====
 const token = process.env.KOOK_TOKEN;
 const guildId = process.env.GUILD_ID;
 const pcRoleId = process.env.PC_ROLE_ID;
@@ -14,12 +11,6 @@ const API = 'https://www.kookapp.cn/api/v3';
 
 let handledMsgIds = new Set();
 let cardMessageId = null;
-
-// ===== emoji对应角色 =====
-const emojiRoleMap = {
-    '🖱️': pcRoleId,
-    '🎮': consoleRoleId
-};
 
 // ===== API =====
 const api = async (method, url, data = null) => {
@@ -50,7 +41,7 @@ const sendCard = async () => {
             type: "section",
             text: {
                 type: "kmarkdown",
-                content: "【角色自助分配】\n🖱️ PC玩家\n🎮 主机玩家\n\n👉 点下面emoji领取"
+                content: "【角色自助分配】\n🖱️ PC玩家\n🎮 主机玩家"
             }
         }]
     }];
@@ -71,14 +62,7 @@ const grantRole = (userId, roleId) =>
         role_id: roleId
     });
 
-const revokeRole = (userId, roleId) =>
-    api('post', '/guild/revoke-role', {
-        guild_id: guildId,
-        user_id: userId,
-        role_id: roleId
-    });
-
-// ===== 轮询（只负责指令）=====
+// ===== 监听指令 =====
 const checkMessages = async () => {
     const res = await api('get', `/message/list?channel_id=${channelId}&limit=20`);
     const msgs = res.data.items;
@@ -100,79 +84,41 @@ const checkMessages = async () => {
     }
 };
 
-// ===== WebSocket（只负责emoji）=====
-const connectWS = async () => {
-    const res = await api('get', '/gateway/index');
-    const ws = new WebSocket(res.data.url);
+// ===== 同步reaction（核心）=====
+const syncReactions = async () => {
+    if (!cardMessageId) return;
 
-    ws.on('open', () => {
-        console.log('✅ WS已连接');
+    try {
+        const res = await api('get', `/message/view?msg_id=${cardMessageId}`);
+        const msg = res.data;
 
-        ws.send(JSON.stringify({
-            type: 'IDENTIFY',
-            token: token,
-            intents: 0
-        }));
-    });
+        const reactions = msg.reactions || [];
 
-    ws.on('message', (data, isBinary) => {
-        let text;
+        for (const r of reactions) {
+            const emoji = r.emoji.name;
 
-        if (isBinary) {
-            try {
-                text = zlib.inflateSync(data).toString();
-            } catch {
-                text = data.toString();
-            }
-        } else {
-            text = data.toString();
-        }
+            let roleId = null;
+            if (emoji === '🖱️') roleId = pcRoleId;
+            if (emoji === '🎮') roleId = consoleRoleId;
 
-        let event;
-        try {
-            event = JSON.parse(text);
-        } catch {
-            return;
-        }
+            if (!roleId) continue;
 
-        if (event.s === 3) return;
-
-        // 心跳
-        if (event.s === 1) {
-            setInterval(() => {
-                ws.send(JSON.stringify({ s: 2 }));
-            }, event.d.heartbeat_interval);
-            return;
-        }
-
-        const d = event.d;
-        if (!d || !d.type) return;
-
-        // ===== 监听emoji =====
-        if (d.type === 'added_reaction') {
-            if (d.msg_id !== cardMessageId) return;
-
-            const role = emojiRoleMap[d.emoji.name];
-            if (role) {
-                console.log('👍 加角色:', d.user_id);
-                grantRole(d.user_id, role);
+            for (const user of r.users || []) {
+                console.log('🎯 给角色:', user.id, emoji);
+                await grantRole(user.id, roleId);
             }
         }
 
-        if (d.type === 'deleted_reaction') {
-            if (d.msg_id !== cardMessageId) return;
-
-            const role = emojiRoleMap[d.emoji.name];
-            if (role) {
-                console.log('👎 移除角色:', d.user_id);
-                revokeRole(d.user_id, role);
-            }
-        }
-    });
+    } catch (err) {
+        console.error('同步失败:', err.message);
+    }
 };
 
 // ===== 启动 =====
-console.log('🚀 启动（最终版）');
+console.log('🚀 终极稳定版启动');
 
+// 指令监听
 setInterval(checkMessages, 3000);
-connectWS();
+
+// emoji同步
+setInterval(syncReactions, 5000);
