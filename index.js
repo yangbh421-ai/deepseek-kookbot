@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { Client, Intents, Card, CardMessage, Element, Types } = require('khl.js');
+const { Client, Intents, Card, CardMessage, Element, Types } = require('@khl.js/core');
 
 // 读取环境变量
 const token = process.env.KOOK_TOKEN;
