@@ -16,8 +16,6 @@ if (!token || !guildId || !pcRoleId || !consoleRoleId || !announceChannelId) {
     process.exit(1);
 }
 
-// 配置
-const GATEWAY_URL = 'wss://ws.kookapp.cn';
 const API_BASE = 'https://www.kookapp.cn/api/v3';
 const CARD_MARKER = '【角色自助分配卡片】请点击下方表情获取对应角色：';
 let cardMessageId = null;      // 当前卡片消息ID
@@ -54,8 +52,12 @@ const sendMessage = async (channelId, content, type = 1) => {
 };
 
 // 发送卡片消息
-const sendCardMessage = async (channelId, card) => {
-    const data = { channel_id: channelId, type: 10, content: card };
+const sendCardMessage = async (channelId, cardArray) => {
+    const data = {
+        channel_id: channelId,
+        type: 10,
+        content: JSON.stringify(cardArray) // 必须转为 JSON 字符串
+    };
     return await apiRequest('post', '/message/create', data);
 };
 
@@ -114,14 +116,13 @@ const isAdmin = async (userId) => {
     }
 };
 
-// 查找已有的卡片消息
+// 查找已有的卡片消息（由本机器人发送的）
 const findExistingCard = async () => {
     try {
         const messages = await getMessages(announceChannelId, 100);
         for (const msg of messages) {
-            if (msg.author_id === '1' && msg.content.includes(CARD_MARKER)) { // 1 是机器人自己的ID? 但机器人的 author_id 是实际ID，这里需要判断 author_name 或类型？简便：检查内容并忽略自己的消息
-                // 更准确：检查作者是否为机器人（通过author.bot字段）
-                if (msg.author.bot) return msg;
+            if (msg.author.bot && msg.content.includes(CARD_MARKER)) {
+                return msg;
             }
         }
     } catch (err) {
@@ -132,7 +133,6 @@ const findExistingCard = async () => {
 
 // 发送角色卡片
 const sendRoleCard = async () => {
-    // 构建卡片 JSON（KOOK卡片格式）
     const card = {
         type: "card",
         theme: "info",
@@ -166,7 +166,6 @@ const syncRoles = async () => {
     }
     console.log('开始同步角色...');
 
-    // 获取卡片消息详情
     let msg;
     try {
         msg = await getMessage(cardMessageId);
@@ -222,72 +221,37 @@ const syncRoles = async () => {
     console.log('同步完成');
 };
 
-// ========== 网关消息处理 ==========
-const handleGatewayEvent = (event) => {
-    const { type, d } = event;
-    // 更新 sequence
-    if (event.s) sequence = event.s;
+// ========== 网关连接 ==========
+let wsGatewayUrl = null;
 
-    switch (type) {
-        case 'MESSAGE_CREATE':
-            // 处理普通消息（指令）
-            if (d.type !== 1) break; // 只处理文本消息
-            if (d.content === '!sendcard') {
-                // 异步处理，不阻塞
-                (async () => {
-                    const isAuth = await isAdmin(d.author.id);
-                    if (!isAuth) {
-                        await sendMessage(d.channel_id, '你没有权限执行此指令。');
-                        return;
-                    }
-                    try {
-                        const newMsg = await sendRoleCard();
-                        cardMessageId = newMsg.msg_id;
-                        await syncRoles(); // 同步一次
-                        await sendMessage(d.channel_id, '卡片已发送，并已同步角色状态。');
-                    } catch (err) {
-                        console.error('发送卡片失败:', err);
-                        await sendMessage(d.channel_id, '发送卡片失败，请检查日志。');
-                    }
-                })();
-            }
-            break;
-
-        case 'MESSAGE_REACTION_ADDED':
-            // 添加表情反应
-            if (d.guild_id !== guildId) break;
-            if (d.msg_id !== cardMessageId) break;
-            if (d.user_id === '1') break; // 忽略机器人自己
-
-            const emojiAdd = d.emoji.name;
-            const roleIdAdd = emojiRoleMap[emojiAdd];
-            if (roleIdAdd) {
-                grantRole(d.user_id, roleIdAdd).catch(err => console.error(`添加角色失败 (${d.user_id}):`, err.message));
-            }
-            break;
-
-        case 'MESSAGE_REACTION_REMOVED':
-            // 移除表情反应
-            if (d.guild_id !== guildId) break;
-            if (d.msg_id !== cardMessageId) break;
-            if (d.user_id === '1') break;
-
-            const emojiRemove = d.emoji.name;
-            const roleIdRemove = emojiRoleMap[emojiRemove];
-            if (roleIdRemove) {
-                revokeRole(d.user_id, roleIdRemove).catch(err => console.error(`移除角色失败 (${d.user_id}):`, err.message));
-            }
-            break;
-
-        default:
-            // 其他事件忽略
-            break;
+// 获取网关地址
+const getGatewayUrl = async () => {
+    try {
+        const res = await apiRequest('get', '/gateway/index');
+        if (res.code === 0 && res.data.url) {
+            return res.data.url;
+        } else {
+            throw new Error('获取网关地址失败: ' + JSON.stringify(res));
+        }
+    } catch (err) {
+        console.error('获取网关地址失败:', err);
+        throw err;
     }
 };
 
-// ========== WebSocket 连接管理 ==========
-const connectWebSocket = () => {
-    ws = new WebSocket(GATEWAY_URL);
+const connectWebSocket = async () => {
+    if (!wsGatewayUrl) {
+        try {
+            wsGatewayUrl = await getGatewayUrl();
+            console.log('网关地址:', wsGatewayUrl);
+        } catch (err) {
+            console.error('无法获取网关地址，5秒后重试');
+            setTimeout(connectWebSocket, 5000);
+            return;
+        }
+    }
+
+    ws = new WebSocket(wsGatewayUrl);
 
     ws.on('open', () => {
         console.log('WebSocket 已连接');
@@ -296,7 +260,7 @@ const connectWebSocket = () => {
             type: 'IDENTIFY',
             token: token,
             compress: false,
-            intents: 1024 // 需要监听的消息事件 intents
+            intents: 1024 // 监听消息和反应事件
         };
         ws.send(JSON.stringify(authPayload));
     });
@@ -313,7 +277,6 @@ const connectWebSocket = () => {
 
         // 处理心跳响应
         if (event.type === 'HEARTBEAT_ACK') {
-            // 忽略
             return;
         }
 
@@ -344,7 +307,67 @@ const connectWebSocket = () => {
 
     ws.on('error', (err) => {
         console.error('WebSocket 错误:', err);
+        ws.close(); // 触发重连
     });
+};
+
+// ========== 网关消息处理 ==========
+const handleGatewayEvent = (event) => {
+    const { type, d } = event;
+    if (event.s) sequence = event.s;
+
+    switch (type) {
+        case 'MESSAGE_CREATE':
+            // 处理普通消息（指令）
+            if (d.type !== 1) break; // 只处理文本消息
+            if (d.content === '!sendcard') {
+                (async () => {
+                    const isAuth = await isAdmin(d.author.id);
+                    if (!isAuth) {
+                        await sendMessage(d.channel_id, '你没有权限执行此指令。');
+                        return;
+                    }
+                    try {
+                        const newMsg = await sendRoleCard();
+                        cardMessageId = newMsg.msg_id;
+                        await syncRoles();
+                        await sendMessage(d.channel_id, '卡片已发送，并已同步角色状态。');
+                    } catch (err) {
+                        console.error('发送卡片失败:', err);
+                        await sendMessage(d.channel_id, '发送卡片失败，请检查日志。');
+                    }
+                })();
+            }
+            break;
+
+        case 'MESSAGE_REACTION_ADDED':
+            if (d.guild_id !== guildId) break;
+            if (d.msg_id !== cardMessageId) break;
+            if (d.user_id === '1') break; // 忽略机器人自己
+
+            const emojiAdd = d.emoji.name;
+            const roleIdAdd = emojiRoleMap[emojiAdd];
+            if (roleIdAdd) {
+                grantRole(d.user_id, roleIdAdd).catch(err => console.error(`添加角色失败 (${d.user_id}):`, err.message));
+            }
+            break;
+
+        case 'MESSAGE_REACTION_REMOVED':
+            if (d.guild_id !== guildId) break;
+            if (d.msg_id !== cardMessageId) break;
+            if (d.user_id === '1') break;
+
+            const emojiRemove = d.emoji.name;
+            const roleIdRemove = emojiRoleMap[emojiRemove];
+            if (roleIdRemove) {
+                revokeRole(d.user_id, roleIdRemove).catch(err => console.error(`移除角色失败 (${d.user_id}):`, err.message));
+            }
+            break;
+
+        default:
+            // 其他事件忽略
+            break;
+    }
 };
 
 // ========== 启动机器人 ==========
@@ -356,7 +379,6 @@ const start = async () => {
     if (existing) {
         cardMessageId = existing.msg_id;
         console.log(`找到已有卡片: ${cardMessageId}`);
-        // 同步一次
         await syncRoles();
     } else {
         console.log('未找到已有卡片，请使用 !sendcard 指令发送。');
